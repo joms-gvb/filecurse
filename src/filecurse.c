@@ -1,4 +1,4 @@
-#include <ncurses.h>
+#include <ncursesw/ncurses.h>
 #include <wchar.h>
 #include <locale.h>
 #include <stdio.h>
@@ -23,6 +23,200 @@ struct FileExplorer {
 	int file_cnt;
 	int sel_file;
 };
+
+static WINDOW *win_list;
+static WINDOW *win_preview;
+static WINDOW *win_status;
+static int list_top;
+
+static void ui_window_create(void)
+{
+	int h, w;
+
+	getmaxyx(stdscr, h, w);
+
+	if (win_list) {
+		delwin(win_list);
+		delwin(win_preview);
+		delwin(win_status);
+	}
+
+	win_list    = newwin(h - 2, w / 2, 0, 0);
+	win_preview = newwin(h - 2, w - w / 2, 0, w / 2);
+	win_status  = newwin(2, w, h - 2, 0);
+
+	box(win_list, 0, 0);
+	box(win_preview, 0, 0);
+	wrefresh(win_list);
+	wrefresh(win_preview);
+	wrefresh(win_status);
+}
+
+static void ui_init(void)
+{
+	initscr();
+	start_color();
+	use_default_colors();
+	init_pair(1, COLOR_WHITE, COLOR_BLUE);
+	init_pair(2, COLOR_CYAN, -1);
+	cbreak();
+	noecho();
+	keypad(stdscr, TRUE);
+	mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
+	list_top = 0;
+	ui_window_create();
+}
+
+static void kill_ui(void)
+{
+	if (win_list)
+		delwin(win_list);
+	if (win_preview)
+		delwin(win_preview);
+	if (win_status)
+		delwin(win_status);
+	endwin();
+}
+
+static void ui_render_list(struct FileExplorer *exp, int top, int sel)
+{
+	int maxy, maxx;
+	int y = 1; /* leave 0 for box */
+
+	getmaxyx(win_list, maxy, maxx);
+	werase(win_list);
+	box(win_list, 0, 0);
+
+	for (int i = top; i < exp->file_cnt && y < maxy - 1; i++, y++) {
+		if (i == sel)
+			wattron(win_list, A_REVERSE);
+		if (exp->files[i].is_dir) {
+			wattron(win_list, COLOR_PAIR(2));
+			mvwprintw(win_list, y, 2, "%s/", exp->files[i].name);
+			wattroff(win_list, COLOR_PAIR(2));
+		} else { 
+			/* TODO add function to marc executables 
+			 * (use stat to test mode, flag must be added in FileInfo)
+			 */
+			mvwprintw(win_list, y, 2, "%s", exp->files[i].name);
+		}
+
+		if (i == sel)
+			wattroff(win_list, A_REVERSE);
+	}
+
+	wrefresh(win_list);
+}
+
+static void ui_render_preview(const char *path)
+{
+	FILE *f;
+
+	char buf[512];
+	int y = 1, maxy, maxx;
+	getmaxyx(win_preview, maxy, maxx);
+	werase(win_preview);
+	box(win_preview, 0, 0);
+
+	if (!path) {
+		mvwprintw(win_preview, 1, 2, "No file selected");
+		wrefresh(win_preview);
+		return;
+	}
+	f = fopen(path, "r");
+	if (!f) {
+		mvwprintw(win_preview, 1, 2, "Cannot open: %s", path);
+		wrefresh(win_preview);
+		return;
+	}
+
+	while (y < maxy - 1 && fgets(buf, sizeof(buf), f)) {
+		buf[maxx - 4] = '\0';
+		mvwprintw(win_preview, y++, 2, "%s", buf);
+	}
+
+	fclose(f);
+	wrefresh(win_preview);
+}
+
+static wchar_t *utf8_to_wcs_conv(const char *s, size_t *out_len)
+{
+	wchar_t *buf = NULL;
+	size_t cap = 0, len = 0;
+	mbstate_t st;
+	const unsigned char *p;
+	size_t ret;
+	wchar_t wc;
+
+	if (!s)
+		return NULL;
+
+	memset(&st, 0, sizeof(st));
+	p = (const unsigned char *)s;
+
+	while (*p) {
+		ret = mbrtowc(&wc, (const char *)p, MB_CUR_MAX, &st);
+		if (ret == (size_t) -1 || ret == (size_t) -2) {
+			errno = EILSEQ;
+			free(buf);
+			return NULL;
+		}
+
+		if (len + 1 >= cap) {
+			size_t ncap = cap ? cap * 2 : 64;
+			wchar_t *nb = realloc(buf, ncap * sizeof(*nb));
+			if (!nb) {
+				free(buf);
+				return NULL;
+			}
+			buf = nb;
+			cap = ncap;
+		}
+		buf[len++] = wc;
+		if (ret == 0)
+			break;
+		p += ret;
+	}
+	if (!buf)  {
+		buf = malloc(sizeof(*buf));
+		if (!buf)
+			return NULL;
+		cap = 1;
+	}
+	buf[len] = L'\0';
+	if (out_len)
+		*out_len = len;
+	return buf;
+}
+
+
+static void ui_status(const char *msg)
+{
+	wchar_t *wmsg;
+	int maxw;
+	if (!msg)
+		msg = "";
+
+	wbkgdset(win_status, COLOR_PAIR(1));
+	werase(win_status);
+	wbkgd(win_status, ' ' | COLOR_PAIR(1));
+
+	wmsg = utf8_to_wcs_conv(msg, NULL);
+	maxw = getmaxx(win_status) - 2;
+
+	if (maxw < 0)
+		maxw = 0;
+	if  (wmsg) {
+		mvwaddnwstr(win_status, 0, 1, wmsg, maxw);
+		free(wmsg);
+	} else
+		mvwprintw(win_status, 0, 1, "%s", msg);
+
+	wrefresh(win_status);
+
+}
+
+// TODO Work on utf8 suport
 
 static void print_utf8_line(const char *utf8)
 {
@@ -113,7 +307,7 @@ void pfile(const char *fname)
 	file = fopen(fname, "r");
 
 	if (!file) {
-		printw("ERROR: Could not open file %s\n", fname);
+		ui_status("ERROR: could not open file"); /* TODO add functionality to print filename */
 		return;
 	}
 
@@ -315,21 +509,14 @@ void status_print(const char *msg)
 	print_utf8_line(msg);
 }
 
+/*
 int main()
 {
-	setlocale(LC_ALL, "");
-
-	initscr();
-	start_color();
-	init_pair(1, COLOR_WHITE, COLOR_BLUE);
-	cbreak();
-	noecho();
-	keypad(stdscr, TRUE);
-
-	struct FileExplorer exp = {0};
-	char *cur_dir = ".";
-
+	struct FileExplorer exp = {.file_cnt = 0, .sel_file = 0};
+	const char *cur_dir = ".";
 	char msg[256];
+	int ch;
+
 	for ( ;; ) {
 		clear();
 
@@ -339,7 +526,7 @@ int main()
 		snprintf(msg, sizeof(msg), "Use ↑/↓ or k/j to navigate, Enter to open, q to quit");
 		status_print(msg);
 
-		int ch = getch();
+		ch = getch();
 
 		switch (ch) {
 		case KEY_UP:
@@ -389,5 +576,97 @@ int main()
 
 out:
 	endwin();
+	return 0;
+}
+*/
+
+int main()
+{
+	struct FileExplorer exp = {.file_cnt = 0, .sel_file = 0 };
+	const char *cur_dir = ".";
+	char msg[256];
+	int ch;
+
+	setlocale(LC_ALL, "");
+	ui_init();
+
+	for ( ;; ) {
+		list_files(&exp, cur_dir);
+
+		if (exp.file_cnt == 0)
+			exp.sel_file = 0;
+		else if (exp.sel_file >= exp.file_cnt)
+			exp.sel_file = exp.file_cnt - 1;
+
+		{
+			int maxy = getmaxy(win_list) - 2;
+			if (maxy < 1 )
+				maxy = 1;
+			if (exp.sel_file < list_top)
+				list_top = exp.sel_file;
+			else if ( exp.sel_file >= list_top + maxy)
+				list_top = exp.sel_file - maxy + 1;
+		}
+
+		ui_render_list(&exp, list_top, exp.sel_file);
+
+		if (exp.file_cnt && !exp.files[exp.sel_file].is_dir)
+			ui_render_preview(exp.files[exp.sel_file].name);
+		else
+			ui_render_preview(NULL);
+
+		snprintf(msg, sizeof(msg), "Use ↑/↓ or k/j to navigate, Enter to open, q to quit");
+		ui_status(msg);
+
+		ch = getch();
+
+		switch (ch) {
+		case KEY_UP:
+		case 'k':
+		case 'K':
+			exp.sel_file = (exp.sel_file > 0 ) ? exp.sel_file - 1 : 0;
+			break;
+		case KEY_DOWN:
+		case 'j':
+		case 'J':
+			exp.sel_file = (exp.sel_file < exp.file_cnt -1) ? exp.sel_file + 1 : (exp.file_cnt ? exp.file_cnt - 1 : 0);
+			break;
+		case '\n':
+			if (exp.file_cnt == 0)
+				break;
+			if (exp.files[exp.sel_file].is_dir)
+				cur_dir = exp.files[exp.sel_file].name;
+			else {
+				snprintf(msg, sizeof(msg), "View or edit %s? (v/e)", exp.files[exp.sel_file].name);
+				ui_status(msg);
+				int choice = getch();
+				if (choice == 'v' || choice == 'V')
+					pfile(exp.files[exp.sel_file].name);
+				else if (choice == 'e' || choice == 'E') {
+					int rc = editor_open(exp.files[exp.sel_file].name);
+
+					if (rc == -1)
+						snprintf(msg, sizeof(msg), "Failed to launch editor for %s", exp.files[exp.sel_file].name);
+					else if (rc != 0)
+						snprintf(msg, sizeof(msg), "Editor exited with status %d for %s", rc, exp.files[exp.sel_file].name);
+					else
+						snprintf(msg, sizeof(msg), "Edited %s", exp.files[exp.sel_file].name);
+
+					ui_status(msg);
+					timeout(1000);
+					timeout(-1);
+				}
+			}
+			break;
+		case 'q':
+		case 'Q':
+			goto out;
+		default:
+			break;
+		}
+	}
+
+out:
+	kill_ui();
 	return 0;
 }
