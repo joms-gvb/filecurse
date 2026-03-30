@@ -1,4 +1,5 @@
 #include <ncursesw/ncurses.h>
+#include <limits.h>
 #include <wchar.h>
 #include <locale.h>
 #include <stdio.h>
@@ -7,6 +8,7 @@
 #include <stdlib.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <signal.h>
 #include <errno.h>
@@ -16,6 +18,8 @@
 struct FileInfo {
 	char name[256];
 	int is_dir;
+	mode_t mode;
+	int is_exe; 
 };
 
 struct FileExplorer {
@@ -98,6 +102,11 @@ static void ui_render_list(struct FileExplorer *exp, int top, int sel)
 			/* TODO add function to marc executables 
 			 * (use stat to test mode, flag must be added in FileInfo)
 			 */
+			if (exp->files[i].is_exe) {
+				wattron(win_list, A_BOLD);
+				mvwprintw(win_list, y, 2, "%s*", exp->files[i].name);
+				wattroff(win_list, A_BOLD);
+			} else
 			mvwprintw(win_list, y, 2, "%s", exp->files[i].name);
 		}
 
@@ -253,6 +262,7 @@ void list_files(struct FileExplorer *exp, const char *dir_name)
 {
 	DIR *dir;
 	struct dirent *entry;
+	char fullpath[PATH_MAX];
 
 	dir = opendir(dir_name);
 	if (!dir) {
@@ -265,14 +275,42 @@ void list_files(struct FileExplorer *exp, const char *dir_name)
 	while ((entry = readdir(dir)) != NULL) {
 		if (exp->file_cnt >= MAX_FILES)
 			break;
+		/* skip . and .. */
+		if (entry->d_name[0] == '.' && (entry->d_name[1] == '\0' ||
+					(entry->d_name[1] == '.' && entry->d_name[2] == '\0')))
+			continue;
 
-		strncpy(exp->files[exp->file_cnt].name, entry->d_name, sizeof(exp->files[exp->file_cnt].name));
-		exp->files[exp->file_cnt].is_dir = (entry->d_type == DT_DIR);
+		strncpy(exp->files[exp->file_cnt].name, entry->d_name, sizeof(exp->files[exp->file_cnt].name) - 1);
+
+		exp->files[exp->file_cnt].name[sizeof(exp->files[exp->file_cnt].name) - 1] = '\0';
+
+		/* default vals */
+		exp->files[exp->file_cnt].is_dir = 0;
+		exp->files[exp->file_cnt].is_exe = 0;
+		exp->files[exp->file_cnt].mode = 0;
+
+		if (entry->d_type == DT_DIR)
+			exp->files[exp->file_cnt].is_dir = 1;
+
+		/* build full path */
+		if (snprintf(fullpath, sizeof(fullpath), "%s/%s", dir_name, entry->d_name) < (int)sizeof(fullpath)) {
+			struct stat st;
+			if (stat(fullpath, &st) == 0) {
+				exp->files[exp->file_cnt].mode = st.st_mode;
+				if (S_ISDIR(st.st_mode))
+					exp->files[exp->file_cnt].is_dir = 1;
+				/* exec bit ? */
+				if (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))
+					exp->files[exp->file_cnt].is_exe = 1;
+			}
+		}
+
 		exp->file_cnt++;
 	}
 
 	closedir(dir);
 }
+
 
 void display_files(struct FileExplorer *exp)
 {
@@ -307,7 +345,10 @@ void pfile(const char *fname)
 	file = fopen(fname, "r");
 
 	if (!file) {
-		ui_status("ERROR: could not open file"); /* TODO add functionality to print filename */
+		char ebuf[128];
+		snprintf(ebuf, sizeof(ebuf), "ERROR: could not open %s", fname);
+
+		ui_status(ebuf);
 		return;
 	}
 
@@ -509,76 +550,6 @@ void status_print(const char *msg)
 	print_utf8_line(msg);
 }
 
-/*
-int main()
-{
-	struct FileExplorer exp = {.file_cnt = 0, .sel_file = 0};
-	const char *cur_dir = ".";
-	char msg[256];
-	int ch;
-
-	for ( ;; ) {
-		clear();
-
-		list_files(&exp, cur_dir);
-		display_files(&exp);
-
-		snprintf(msg, sizeof(msg), "Use ↑/↓ or k/j to navigate, Enter to open, q to quit");
-		status_print(msg);
-
-		ch = getch();
-
-		switch (ch) {
-		case KEY_UP:
-		case 'k':
-		case 'K':
-			exp.sel_file = (exp.sel_file > 0) ? exp.sel_file - 1 : 0;
-			break;
-		case KEY_DOWN:
-		case 'j':
-		case 'J':
-			exp.sel_file = (exp.sel_file < exp.file_cnt - 1) ? exp.sel_file + 1 : exp.file_cnt -1;
-			break;
-		case '\n':
-			if (exp.files[exp.sel_file].is_dir)
-				cur_dir = exp.files[exp.sel_file].name;
-			else {
-				snprintf(msg, sizeof(msg), "View or edit %s? (v/e)", exp.files[exp.sel_file].name);
-				status_print(msg);
-				int choice = getch();
-
-
-				if (choice == 'v' || choice == 'V')
-					pfile(exp.files[exp.sel_file].name);
-				else if (choice == 'e' || choice == 'E') {
-					int rc = editor_open(exp.files[exp.sel_file].name);
-
-					if (rc == -1)
-						snprintf(msg, sizeof(msg), "Failed to launch editor for %s", exp.files[exp.sel_file].name);
-					else if (rc != 0)
-						snprintf(msg, sizeof(msg), "Editor exited with status %d for %s", rc, exp.files[exp.sel_file].name);
-					else
-						snprintf(msg, sizeof(msg), "Edited %s", exp.files[exp.sel_file].name);
-					status_print(msg);
-					timeout(1000);
-					getch();
-					timeout(-1);
-				}
-			}
-
-
-			break;
-		case 'q':
-			 goto out;
-		
-		}
-	}
-
-out:
-	endwin();
-	return 0;
-}
-*/
 
 int main()
 {
