@@ -1,3 +1,6 @@
+/* TODO enhance how to navigate file system, now can only go up, opening a dir bin/ goes to /bin and not to ~/y/bin/ also cant follow dirs in a lot of cases 
+ * perhabs add a functionto change down */
+
 #include <ncursesw/ncurses.h>
 #include <limits.h>
 #include <wchar.h>
@@ -12,6 +15,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <errno.h>
+#include <stdarg.h>
 
 #define MAX_FILES 1024
 
@@ -32,6 +36,18 @@ static WINDOW *win_list;
 static WINDOW *win_preview;
 static WINDOW *win_status;
 static int list_top;
+
+static void save_msg_str(char *buf, size_t bsize, const char *fmt, ...)
+{
+	va_list ap;
+	if (bsize == 0)
+		return;
+	va_start(ap, fmt);
+	vsnprintf(buf, bsize, fmt, ap);
+	va_end(ap);
+
+	buf[bsize - 1] = '\0';
+}
 
 static void ui_window_create(void)
 {
@@ -55,6 +71,62 @@ static void ui_window_create(void)
 	wrefresh(win_preview);
 	wrefresh(win_status);
 }
+
+static int path_join(const char *dir, const char *name, char *out, size_t outlen)
+{
+	int n;
+	if (!dir || !name || !out)
+		return -1;
+	if (strcmp(dir, "/") == 0)
+		n = snprintf(out, outlen, "/%s", name);
+	else
+		n = snprintf(out, outlen, "%s/%s", dir, name);
+
+	return (n >= 0 && (size_t)n < outlen) ? 0 : -1;
+}
+
+static int change_into(const char **cur_dir_ptr, const char *child, char *buf, size_t buflen)
+{
+	if (!child || !cur_dir_ptr || !buf)
+		return -1;
+
+	if (path_join(*cur_dir_ptr, child, buf, buflen) != 0)
+		return -1;
+	
+	if (chdir(buf) != 0)
+		return -1;
+	*cur_dir_ptr = buf;
+	return 0;
+}
+
+static int change_up(const char **cur_dir_ptr, char *buf, size_t buflen)
+{
+	if (!cur_dir_ptr || !buf)
+		return -1;
+	
+	if (!getcwd(buf, buflen))
+		return -1;
+
+	if (strcmp(buf, "/") == 0) {
+		*cur_dir_ptr = buf;
+		return 0;
+	}
+
+	char *p = strrchr(buf, '/');
+	if (!p)
+		return -1;
+	
+	if (p == buf)
+		p[1]  = '\0';
+	else
+		*p = '\0';
+	if (chdir(buf) != 0)
+		return -1;
+
+	*cur_dir_ptr = buf;
+	return 0;
+}
+
 
 static void ui_init(void)
 {
@@ -87,7 +159,7 @@ static void ui_render_list(struct FileExplorer *exp, int top, int sel)
 	int maxy, maxx;
 	int y = 1; /* leave 0 for box */
 
-	getmaxyx(win_list, maxy, maxx);
+	getmaxyx(win_list, maxy, (void)maxx);
 	werase(win_list);
 	box(win_list, 0, 0);
 
@@ -99,9 +171,6 @@ static void ui_render_list(struct FileExplorer *exp, int top, int sel)
 			mvwprintw(win_list, y, 2, "%s/", exp->files[i].name);
 			wattroff(win_list, COLOR_PAIR(2));
 		} else { 
-			/* TODO add function to marc executables 
-			 * (use stat to test mode, flag must be added in FileInfo)
-			 */
 			if (exp->files[i].is_exe) {
 				wattron(win_list, A_BOLD);
 				mvwprintw(win_list, y, 2, "%s*", exp->files[i].name);
@@ -554,11 +623,19 @@ void status_print(const char *msg)
 int main()
 {
 	struct FileExplorer exp = {.file_cnt = 0, .sel_file = 0 };
-	const char *cur_dir = ".";
 	char msg[256];
 	int ch;
 
 	setlocale(LC_ALL, "");
+
+	char cur_dir_buf[PATH_MAX];
+	const char *cur_dir = cur_dir_buf;
+
+	if (!getcwd(cur_dir_buf, sizeof(cur_dir_buf)))
+		strncpy(cur_dir_buf, ".", sizeof(cur_dir_buf));
+
+
+
 	ui_init();
 
 	for ( ;; ) {
@@ -605,10 +682,19 @@ int main()
 		case '\n':
 			if (exp.file_cnt == 0)
 				break;
-			if (exp.files[exp.sel_file].is_dir)
+			/*if (exp.files[exp.sel_file].is_dir)
 				cur_dir = exp.files[exp.sel_file].name;
-			else {
-				snprintf(msg, sizeof(msg), "View or edit %s? (v/e)", exp.files[exp.sel_file].name);
+				*/
+			if (exp.files[exp.sel_file].is_dir) {
+				if (change_into(&cur_dir, exp.files[exp.sel_file].name, cur_dir_buf, sizeof(cur_dir_buf)) != 0)
+					ui_status("Cannot enter directory");
+				else {
+					exp.sel_file = 0;
+					list_top = 0;
+				}
+
+			} else {
+				save_msg_str(msg, sizeof(msg), "View or edit %s? (v/e)", exp.files[exp.sel_file].name);
 				ui_status(msg);
 				int choice = getch();
 				if (choice == 'v' || choice == 'V')
@@ -617,16 +703,27 @@ int main()
 					int rc = editor_open(exp.files[exp.sel_file].name);
 
 					if (rc == -1)
-						snprintf(msg, sizeof(msg), "Failed to launch editor for %s", exp.files[exp.sel_file].name);
+						save_msg_str(msg, sizeof(msg), "Failed to launch editor for %s", exp.files[exp.sel_file].name);
 					else if (rc != 0)
-						snprintf(msg, sizeof(msg), "Editor exited with status %d for %s", rc, exp.files[exp.sel_file].name);
+						save_msg_str(msg, sizeof(msg), "Editor exited with status %d for %s", rc, exp.files[exp.sel_file].name);
 					else
-						snprintf(msg, sizeof(msg), "Edited %s", exp.files[exp.sel_file].name);
+						save_msg_str(msg, sizeof(msg), "Edited %s", exp.files[exp.sel_file].name);
 
 					ui_status(msg);
 					timeout(1000);
 					timeout(-1);
 				}
+			}
+			break;
+		case KEY_BACKSPACE:
+		case 127:
+		case 'h':
+		case 'H':
+			if (change_up(&cur_dir, cur_dir_buf, sizeof(cur_dir_buf)) != 0)
+				ui_status("Cannot go up");
+			else {
+				exp.sel_file = 0;
+				list_top = 0;
 			}
 			break;
 		case 'q':
