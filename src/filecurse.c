@@ -159,24 +159,41 @@ static void ui_render_list(struct FileExplorer *exp, int top, int sel)
 	int maxy, maxx;
 	int y = 1; /* leave 0 for box */
 
-	getmaxyx(win_list, maxy, (void)maxx);
+	getmaxyx(win_list, maxy, maxx);
 	werase(win_list);
 	box(win_list, 0, 0);
 
 	for (int i = top; i < exp->file_cnt && y < maxy - 1; i++, y++) {
+		const char *name = exp->files[i].name;
+		int avail = maxx - 4;
+
+		int namelen = (avail > 0) ? avail : 0;
+
 		if (i == sel)
 			wattron(win_list, A_REVERSE);
+
 		if (exp->files[i].is_dir) {
 			wattron(win_list, COLOR_PAIR(2));
-			mvwprintw(win_list, y, 2, "%s/", exp->files[i].name);
+			if (namelen > 0)
+				mvwprintw(win_list, y, 2, "%.*s/", namelen - 1, name);
+			else
+				mvwprintw(win_list, y, 2, "/");
 			wattroff(win_list, COLOR_PAIR(2));
 		} else { 
 			if (exp->files[i].is_exe) {
 				wattron(win_list, A_BOLD);
-				mvwprintw(win_list, y, 2, "%s*", exp->files[i].name);
+				if (namelen > 0)
+					mvwprintw(win_list, y, 2, "%.*s*", namelen - 1, name);
+				else
+					mvwprintw(win_list, y, 2, "*");
+
 				wattroff(win_list, A_BOLD);
-			} else
-			mvwprintw(win_list, y, 2, "%s", exp->files[i].name);
+			} else {
+				if (namelen > 0)
+					mvwprintw(win_list, y, 2, "%.*s", namelen, name);
+				else
+					mvwprintw(win_list, y, 2, "%s", "");
+			}
 		}
 
 		if (i == sel)
@@ -469,7 +486,7 @@ void pfile(const char *fname)
 		case KEY_DOWN:
 			if (top + 1 < lcnt)
 				top++;
-				break;
+			break;
 		case 'k':
 		case 'K':
 		case KEY_UP:
@@ -567,7 +584,7 @@ int editor_open(const char *fname)
 
 	if (pid == 0) {
 		struct sigaction sa_default;
-		size_t i;
+	/*	size_t i; not in use*/	
 
 		sa_default.sa_handler = SIG_DFL;
 		sigemptyset(&sa_default.sa_mask);
